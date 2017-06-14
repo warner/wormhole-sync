@@ -32,6 +32,7 @@ setup(name="magic-wormhole",
           "hkdf",
           "tqdm >= 4.13.0", # 4.13.0 fixes crash on NetBSD
           "click",
+          "prompt_toolkit",
           "humanize",
           "txtorcon >= 0.19.3",
       ],

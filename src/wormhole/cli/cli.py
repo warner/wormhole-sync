@@ -323,3 +323,17 @@ def ssh_accept(cfg, code, key_file, yes, **kwargs):
     cfg.code = code
 
     return go(cmd_ssh.accept, cfg)
+
+# wormhole open
+@wormhole.command()
+@CommonArgs
+@TorArgs
+@click.pass_obj
+def open(cfg, **kwargs):
+    """Open a connection, for sending and receiving things"""
+    for name, value in kwargs.items():
+        setattr(cfg, name, value)
+    with cfg.timing.add("import", which="cmd_open"):
+        from . import cmd_open
+
+    return go(cmd_open.open_wormhole, cfg)
