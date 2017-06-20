@@ -44,22 +44,14 @@ class Starfield(urwid.Widget):
                                  for whole_row in self.starlines],
                                 maxcol=maxcol)
 
-class Opener(object):
-    def __init__(self, args, reactor):
-        self._args = args
-        self._reactor = reactor
-
-    @inlineCallbacks
+class TUI(object):
     def go(self):
-        #text = prompt("give me input: ")
-        #print("text: ", text)
-        yield None
-
+        # returns a Deferred that fires when the GUI says quit
         done_d = Deferred()
 
         stars = Starfield()
         txt = urwid.Text("Hello world")
-        top_status = urwid.Text("top status")
+        top_status = urwid.Text("Magic-Wormhole status: closed")
         bottom_status = urwid.Text("bottom status")
         top = urwid.Frame(stars,
                           header=top_status,
@@ -82,11 +74,23 @@ class Opener(object):
             stars.twinkle_stars()
             loop.set_alarm_in(0.3, animate)
         alarm = loop.set_alarm_in(0.2, animate)
-        #loop.run()
         loop.start()
+
+        done_d.addCallback(lambda res: loop.stop())
+        return done_d
+
+class Opener(object):
+    def __init__(self, args, reactor):
+        self._args = args
+        self._reactor = reactor
+
+    @inlineCallbacks
+    def go(self):
+        #text = prompt("give me input: ")
+        #print("text: ", text)
+        yield None
+
+        done_d = TUI().go()
+
         yield done_d
-        loop.stop()
-
         print("go exiting")
-        
-
