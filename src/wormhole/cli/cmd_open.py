@@ -1,6 +1,6 @@
 from __future__ import print_function, unicode_literals
 from twisted.internet import reactor
-from twisted.internet.defer import inlineCallbacks, returnValue
+from twisted.internet.defer import inlineCallbacks, Deferred
 import urwid
 
 APPID = u"lothar.com/wormhole/text-or-file-xfer"
@@ -55,6 +55,8 @@ class Opener(object):
         #print("text: ", text)
         yield None
 
+        done_d = Deferred()
+
         stars = Starfield()
         txt = urwid.Text("Hello world")
         top_status = urwid.Text("top status")
@@ -66,9 +68,12 @@ class Opener(object):
         #top = urwid.Filler(pile, valign="top")
         def show_or_exit(key):
             if key.lower() == "q":
+                done_d.callback(None)
                 raise urwid.ExitMainLoop()
             txt.set_text(repr(key))
+        evl = urwid.TwistedEventLoop(manage_reactor=False)
         loop = urwid.MainLoop(top,
+                              event_loop=evl,
                               unhandled_input=show_or_exit)
         def animate(loop=None, user_data=None):
             #with open("/tmp/starbug", "a") as f:
@@ -77,18 +82,10 @@ class Opener(object):
             stars.twinkle_stars()
             loop.set_alarm_in(0.3, animate)
         alarm = loop.set_alarm_in(0.2, animate)
-        loop.run()
-
-        if 0:
-            evl = urwid.TwistedEventLoop(manage_reactor=False)
-            loop = urwid.MainLoop(self.toplevel,
-                                  #screen=self.screen,
-                                  event_loop=evl,
-                                  #unhandled_input=self.mind.unhandled_key,
-                                  #palette=self.palette,
-                                  )
-            self.screen.loop = loop
-            loop.run()
+        #loop.run()
+        loop.start()
+        yield done_d
+        loop.stop()
 
         print("go exiting")
         
