@@ -52,7 +52,7 @@ class TUI(object):
         stars = Starfield()
         txt = urwid.Text("Hello world")
         top_status = urwid.Text("Magic-Wormhole status: closed")
-        bottom_status = urwid.Text("bottom status")
+        bottom_status = urwid.Text("Enter Wormhole Code: 4-pur")
         top = urwid.Frame(stars,
                           header=top_status,
                           footer=bottom_status,
