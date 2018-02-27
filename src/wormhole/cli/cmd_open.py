@@ -27,7 +27,7 @@ class Starfield(urwid.Widget):
 
     def render_stars(self):
         for (col, row, shape) in self.places:
-            self.starlines[row][col] = self.STAR_SHAPES[shape]
+            self.starlines[row][col] = self.STAR_SHAPES[shape:shape+1]
 
     def twinkle_stars(self):
         self.places = [(col, row, (shape+1)%len(self.STAR_SHAPES))
