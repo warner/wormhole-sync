@@ -21,6 +21,8 @@ setup(name="magic-wormhole",
           [
               "wormhole = wormhole.cli.cli:wormhole",
               "w2 = wormhole.newcli:run",
+              "w2-starry = wormhole.newtui:run",
+              "w2-pt = wormhole.newtui_pt:run",
           ]
       },
       install_requires=[
@@ -33,6 +35,7 @@ setup(name="magic-wormhole",
           "hkdf",
           "tqdm >= 4.13.0", # 4.13.0 fixes crash on NetBSD
           "click",
+          "prompt_toolkit",
           "humanize",
           "txtorcon >= 0.19.3",
       ],
