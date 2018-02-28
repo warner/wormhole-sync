@@ -1,16 +1,13 @@
 from __future__ import print_function, unicode_literals
 import os
-from twisted.internet.defer import inlineCallbacks, returnValue
+import random
+import asyncio
+from binascii import b2a_hex
+from twisted.internet.defer import Deferred, inlineCallbacks, returnValue
 from twisted.internet.task import react
 from twisted.python import usage
-#from prompt_toolkit import prompt
-#from prompt_toolkit.interface import CommandLineInterface
 from prompt_toolkit.application import Application
-#from prompt_toolkit.shortcuts import create_eventloop
-#from prompt_toolkit.key_binding.manager import KeyBindingManager
 from prompt_toolkit.key_binding import KeyBindings
-#from prompt_toolkit import print_formatted_text, HTML
-#from prompt_toolkit.layout import FloatContainer, Float, ConditionalContainer
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.controls import FormattedTextControl, UIControl, UIContent
@@ -18,13 +15,13 @@ from prompt_toolkit.widgets import VerticalLine, HorizontalLine, TextArea#, Fram
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.eventloop.defaults import use_asyncio_event_loop, get_event_loop
-import asyncio
 from prompt_toolkit.styles import Style
+from . import create
+
 style = Style.from_dict({#"": "#ff0066", #for the input text
                          "prompt": "#ff0066", # for the prompt itself
                          "input-field": "bg:#000000 #ffffff",
                          })
-import random
 
 class Starfield(object):
     NUM_STARS = 50
@@ -74,9 +71,10 @@ class StarfieldControl(UIControl):
         if self.starfield:
             self.starfield.twinkle()
 
+ALLOCATING, ENTERING = object(), object()
 
 class TUI(object):
-    def __init__(self, options):
+    def __init__(self, reactor, options):
         targetdir = os.getcwd() + os.sep
         homedir = os.path.expanduser("~")
         if targetdir.startswith(homedir):
@@ -89,7 +87,18 @@ class TUI(object):
         self.active = TextArea(text="(no active transfers)",
                                read_only=True,
                                focusable=False)
-        self.need_code = True
+        self.wormhole = create("newcli", relay_url="ws://localhost:4000/v1",
+                               reactor=reactor)
+        self._welcome = "not received"
+        self._verifier = "not received"
+        self.wormhole.get_welcome().addCallback(self._got_welcome)
+        self.wormhole.get_verifier().addCallback(self._got_verifier)
+        if options["generate"]:
+            self._code = ALLOCATING
+            self.wormhole.allocate_code()
+        else:
+            self._code = ENTERING
+        self.wormhole.get_code().addCallback(self._got_code)
         self.input_field = TextArea(height=1, prompt=self.get_prompt,
                                     style="class:input-field")
         left = HSplit([
@@ -146,9 +155,25 @@ class TUI(object):
         self.app.invalidate()
 
     def get_instructions(self):
-        return "Control-Q: quit\n\ndownloading into:\n{}\n".format(self.targetdir)
+        lines = ["Control-Q: quit",
+                 "",
+                 "downloading into:",
+                 self.targetdir,
+                 ""
+                 "welcome: {}".format(self._welcome),
+                 "verifier: {}".format(self._verifier),
+                 "",
+                 ]
+        if self._code is ALLOCATING:
+            lines.append("allocating a code..")
+        elif self._code is ENTERING:
+            lines.append("please enter the wormhole code below")
+        else:
+            lines.append("wormhole code is:  {}".format(self._code))
+        return "\n".join(lines)
+
     def get_prompt(self):
-        if self.need_code:
+        if self._code is ENTERING:
             return "Code: "
         else:
             return "Send: "
@@ -167,28 +192,43 @@ class TUI(object):
                                                  cursor_position=len(text)),
                                         bypass_readonly=True)
 
-    def got_code(self, code):
-        pass
+    def _got_code(self, code):
+        self._code = code
+        self.app.invalidate()
 
     def enter(self, event):
-        if self.need_code:
-            self.got_code(self.input_field.text)
-            self.need_code = False
+        if self._code is ENTERING:
+            self._code = self.input_field.text
+            self.wormhole.set_code(self._code)
         else:
             self._start_send(self.input_field.text)
         self.input_field.text = ""
 
+    def _got_welcome(self, welcome):
+        self._welcome = welcome
+        self.app.invalidate()
+    def _got_verifier(self, verifier):
+        self._verifier = b2a_hex(verifier).decode("ascii")
+        self.app.invalidate()
+
 class Options(usage.Options):
-    pass
+    optFlags = [
+        ("generate", "g", "Generate a code, instead of accepting one"),
+        ]
 
 @inlineCallbacks
 def go(reactor, options):
     yield None
+    # exceptions tend to get masked. Comment out use_asyncio_event_loop to
+    # reveal them.
     use_asyncio_event_loop()
-    t = TUI(options)
+    t = TUI(reactor, options)
     t.start_animation()
     f = t.app.run_async()
-    get_event_loop().run_until_complete(f)
+    d = Deferred()
+    f.add_done_callback(d.callback)
+    yield d
+    #get_event_loop().run_until_complete(f)
     returnValue(0)
 
 def run():
