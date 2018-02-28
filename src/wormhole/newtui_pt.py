@@ -13,7 +13,7 @@ from prompt_toolkit.key_binding import KeyBindings
 #from prompt_toolkit.layout import FloatContainer, Float, ConditionalContainer
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window
 from prompt_toolkit.layout.layout import Layout
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import FormattedTextControl, UIControl, UIContent
 from prompt_toolkit.widgets import VerticalLine, HorizontalLine, TextArea#, Frame
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_focus
@@ -48,6 +48,32 @@ class Starfield(object):
 
     def render(self):
         return "\n".join(["".join(row) for row in self.field]) + "\n"
+    def render_lines(self):
+        return ["".join(row) for row in self.field]
+
+# this is a UIControl
+class StarfieldControl(UIControl):
+    def __init__(self):
+        self.starfield = None
+        self.width = None
+        self.height = None
+
+    def create_content(self, width, height):
+        if (width, height) != (self.width, self.height):
+            (self.width, self.height) = (width, height)
+            self.starfield = Starfield(width, height)
+        self.starfield.twinkle()
+        #text = self.starfield.render()
+        lines = self.starfield.render_lines()
+        content = UIContent(get_line=lambda i: [("", lines[i]),],
+                            line_count=len(lines),
+                            show_cursor=False)
+        return content
+
+    def twinkle(self):
+        if self.starfield:
+            self.starfield.twinkle()
+
 
 class TUI(object):
     def __init__(self, options):
@@ -70,19 +96,15 @@ class TUI(object):
             Window(FormattedTextControl(self.get_instructions),
                    dont_extend_height=True),
             Window(height=1, char="="),
-            #Window(FormattedTextControl(active)),
             self.active,
-            #Window(height=1, char="-"),
             HorizontalLine(),
             self.input_field,
             ])
-        self.starfield = Starfield(maxcol=20, maxrow=10)
+        self.starfield_control = StarfieldControl()
         body = VSplit([
             left,
-            #Window(width=1, char="|"),
             VerticalLine(),
-            Window(FormattedTextControl(self.get_starfield,
-                                        focusable=False)),
+            Window(self.starfield_control),
             ])
 
         kb = KeyBindings()
@@ -92,7 +114,6 @@ class TUI(object):
         app = Application(
             full_screen=True,
             layout=Layout(body),
-            #layout=Layout(screen),
             key_bindings=kb,
             style=style,
             )
@@ -121,13 +142,8 @@ class TUI(object):
                                                  self._do_animation_loop)
 
     def _do_animation(self):
-        #self.starcount += 1
-        self.starfield.twinkle()
+        self.starfield_control.twinkle()
         self.app.invalidate()
-
-    def get_starfield(self):
-        #return "imagine stars {}"#.format(self.starcount)
-        return self.starfield.render()
 
     def get_instructions(self):
         return "Control-Q: quit\n\ndownloading into:\n{}\n".format(self.targetdir)
@@ -176,14 +192,14 @@ def go(reactor, options):
     returnValue(0)
 
 def run():
+    options = Options()
+    options.parseOptions()
     loop = asyncio.get_event_loop()
     from twisted.internet.asyncioreactor import install
     install(loop) # we must install the same loop that prompt_toolkit will use
     # a bare install() would create a brand new loop, distinct from PT's
 
     # but then PT will find the loop itself, we don't need to pass it in
-    options = Options()
-    options.parseOptions()
 
     return react(go, (options,))
     #open(None, options)
