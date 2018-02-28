@@ -6,6 +6,7 @@ from binascii import b2a_hex
 from twisted.internet.defer import Deferred, inlineCallbacks, returnValue
 from twisted.internet.task import react
 from twisted.python import usage
+from twisted.python.filepath import FilePath
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window
@@ -17,11 +18,72 @@ from prompt_toolkit.filters import has_focus
 from prompt_toolkit.eventloop.defaults import use_asyncio_event_loop, get_event_loop
 from prompt_toolkit.styles import Style
 from . import create
+from .errors import LonelyError
 
 style = Style.from_dict({#"": "#ff0066", #for the input text
                          "prompt": "#ff0066", # for the prompt itself
                          "input-field": "bg:#000000 #ffffff",
                          })
+
+from twisted.internet.protocol import Protocol, Factory
+from twisted.protocols.basic import FileSender
+
+class SendProtocol(Protocol):
+    def __init__(self, f, remote_filename):
+        self.f = f
+        self.remote_filename = remote_filename
+    def connectionMade(self):
+        self.transport.write(self.remote_filename.encode("utf-8"))
+        self.transport.write(b"\x00")
+        fs = FileSender()
+        d = fs.beginFileTransfer(self.f, self.transport)
+        d.addCallback(lambda _: self.transport.loseConnection())
+
+class SendFactory(Factory):
+    def __init__(self, p):
+        self.p = p
+    def buildProtocol(self, addr):
+        return self.p
+
+class ReceiveProtocol(Protocol):
+    def __init__(self, target_filepath):
+        self.target_filepath = target_filepath
+        self.file = None
+        self.buffer = b""
+    def connectionMade(self):
+        pass
+    def dataReceived(self, data):
+        self.buffer += data
+        if not self.file:
+            if b"\x00" in self.buffer:
+                i = self.buffer.find(b"\x00")
+                filename = self.buffer[:i].decode("utf-8")
+                self.buffer = self.buffer[i+1:]
+                self.file = self.target_filepath.child(filename).open("wb")
+            else:
+                return
+        self.file.write(data)
+    def connectionLost(self, why=None):
+        if self.file:
+            self.file.close()
+
+class ReceiveFactory(Factory):
+    def __init__(self, target_filepath):
+        self.target_filepath = target_filepath
+    def buildProtocol(self, addr):
+        return ReceiveProtocol(self.target_filepath)
+
+class Transfer(object):
+    def __init__(self, wormhole, target_filepath):
+        wormhole.dilate().addCallback(self._dilated, target_filepath)
+
+    def _dilated(self, endpoints, target_filepath):
+        (self.control_ep, self.connect_ep, self.listen_ep) = endpoints
+        rf = ReceiveFactory(target_filepath)
+        self.listen_ep.listen(rf)
+
+    def send(self, f, remote_filename):
+        self.connect_ep.connect(SendFactory(SendProtocol(f, remote_filename)))
 
 class Starfield(object):
     NUM_STARS = 50
@@ -71,34 +133,39 @@ class StarfieldControl(UIControl):
         if self.starfield:
             self.starfield.twinkle()
 
-ALLOCATING, ENTERING = object(), object()
+ALLOCATING, ENTERING, BROKEN, CONNECTED = object(), object(), object(), object()
 
 class TUI(object):
-    def __init__(self, reactor, options):
+    def __init__(self, wormhole, options):
         targetdir = os.getcwd() + os.sep
         homedir = os.path.expanduser("~")
         if targetdir.startswith(homedir):
             targetdir = "~/" + targetdir[len(homedir+os.sep):]
         if len(targetdir) > 40:
             targetdir = "... " + targetdir[-40:]
-        self.targetdir = targetdir
+        self.target_filepath = FilePath(targetdir)
 
         self.active_transfers = []
         self.active = TextArea(text="(no active transfers)",
                                read_only=True,
                                focusable=False)
-        self.wormhole = create("newcli", relay_url="ws://localhost:4000/v1",
-                               reactor=reactor)
+        self.wormhole = wormhole
         self._welcome = "not received"
         self._verifier = "not received"
-        self.wormhole.get_welcome().addCallback(self._got_welcome)
-        self.wormhole.get_verifier().addCallback(self._got_verifier)
+        self._error = None
+        self.wormhole.get_welcome().addCallbacks(self._got_welcome,
+                                                 self._wormhole_error)
+        self.wormhole.get_verifier().addCallbacks(self._got_verifier,
+                                                  self._wormhole_error)
         if options["generate"]:
             self._code = ALLOCATING
             self.wormhole.allocate_code()
         else:
             self._code = ENTERING
         self.wormhole.get_code().addCallback(self._got_code)
+        self.transfer = Transfer(self.wormhole, self.target_filepath)
+
+
         self.input_field = TextArea(height=1, prompt=self.get_prompt,
                                     style="class:input-field")
         left = HSplit([
@@ -158,16 +225,22 @@ class TUI(object):
         lines = ["Control-Q: quit",
                  "",
                  "downloading into:",
-                 self.targetdir,
+                 str(self.target_filepath),
                  ""
                  "welcome: {}".format(self._welcome),
                  "verifier: {}".format(self._verifier),
-                 "",
                  ]
+        if self._error:
+            lines.append("error: {}".format(self._error))
+        lines.append("")
         if self._code is ALLOCATING:
             lines.append("allocating a code..")
         elif self._code is ENTERING:
             lines.append("please enter the wormhole code below")
+        elif self._code is BROKEN:
+            lines.append("wormhole is broken, please quit")
+        elif self._code is CONNECTED:
+            lines.append("wormhole connected")
         else:
             lines.append("wormhole code is:  {}".format(self._code))
         return "\n".join(lines)
@@ -175,6 +248,8 @@ class TUI(object):
     def get_prompt(self):
         if self._code is ENTERING:
             return "Code: "
+        elif self._code is BROKEN:
+            return "Error: press control-Q to quit"
         else:
             return "Send: "
 
@@ -191,6 +266,7 @@ class TUI(object):
         self.active.buffer.set_document(Document(text=text,
                                                  cursor_position=len(text)),
                                         bypass_readonly=True)
+        self.transfer.send(open(filename, "rb"), filename)
 
     def _got_code(self, code):
         self._code = code
@@ -209,6 +285,11 @@ class TUI(object):
         self.app.invalidate()
     def _got_verifier(self, verifier):
         self._verifier = b2a_hex(verifier).decode("ascii")
+        self._code = CONNECTED
+        self.app.invalidate()
+    def _wormhole_error(self, f):
+        self._code = BROKEN
+        self._error = repr(f.value) #"ERROR" #str(f.value)
         self.app.invalidate()
 
 class Options(usage.Options):
@@ -222,12 +303,17 @@ def go(reactor, options):
     # exceptions tend to get masked. Comment out use_asyncio_event_loop to
     # reveal them.
     use_asyncio_event_loop()
-    t = TUI(reactor, options)
+    w = create("newcli", relay_url="ws://localhost:4000/v1", reactor=reactor)
+    t = TUI(w, options)
     t.start_animation()
     f = t.app.run_async()
     d = Deferred()
     f.add_done_callback(d.callback)
     yield d
+    try:
+        yield w.close()
+    except LonelyError:
+        pass
     #get_event_loop().run_until_complete(f)
     returnValue(0)
 
@@ -235,6 +321,10 @@ def run():
     options = Options()
     options.parseOptions()
     loop = asyncio.get_event_loop()
+    #loop.set_debug(True)
+    #from twisted.python import log
+    #import sys
+    #log.startLogging(sys.stderr)
     from twisted.internet.asyncioreactor import install
     install(loop) # we must install the same loop that prompt_toolkit will use
     # a bare install() would create a brand new loop, distinct from PT's
