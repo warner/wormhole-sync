@@ -83,6 +83,17 @@ class Sender:
 
     @inlineCallbacks
     def _go(self, w):
+        args = self._args
+
+        # if we're sending a file of some sort, dilate the wormhole. This
+        # Deferred doesn't fire until the transit connection is established,
+        # which won't even start until the wormhole itself is established. But
+        # we start it now so Transit can build listening sockets (especially
+        # onion services) in parallel with waiting for the user to transcribe
+        # the code).
+        #if self._args.what:
+        #    transit_d = w.dilate()
+
         welcome = yield w.get_welcome()
         handle_welcome(welcome, self._args.relay_url, __version__,
                        self._args.stderr)
@@ -90,7 +101,6 @@ class Sender:
         # TODO: run the blocking zip-the-directory IO in a thread, let the
         # wormhole exchange happen in parallel
         offer, self._fd_to_send = self._build_offer()
-        args = self._args
 
         other_cmd = u"wormhole receive"
         if args.verify:
