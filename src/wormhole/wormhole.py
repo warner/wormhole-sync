@@ -101,7 +101,8 @@ class _DelegatedWormhole(object):
 
 @implementer(IWormhole, IDeferredWormhole)
 class _DeferredWormhole(object):
-    def __init__(self, eq):
+    def __init__(self, reactor, eq):
+        self._reactor = reactor
         self._welcome_observer = OneShotObserver(eq)
         self._code_observer = OneShotObserver(eq)
         self._key = None
@@ -176,6 +177,10 @@ class _DeferredWormhole(object):
                         file=sys.stderr):
         self._boss._set_trace(client_name, which, file)
 
+    def dilate(self):
+        from ._fake_dilate import start_dilation
+        return start_dilation(self, self._reactor)
+
     # from below
     def got_welcome(self, welcome):
         self._welcome_observer.fire_if_not_fired(welcome)
@@ -227,7 +232,7 @@ def create(appid, relay_url, reactor, # use keyword args for everything else
     if delegate:
         w = _DelegatedWormhole(delegate)
     else:
-        w = _DeferredWormhole(eq)
+        w = _DeferredWormhole(reactor, eq)
     wormhole_versions = {} # will be used to indicate Wormhole capabilities
     wormhole_versions["app_versions"] = versions # app-specific capabilities
     b = Boss(w, side, relay_url, appid, wormhole_versions,
