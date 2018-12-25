@@ -7,6 +7,8 @@ import tempfile
 import zipfile
 
 import six
+from attr import attrs, attrib
+from attr.validators import instance_of
 from humanize import naturalsize
 from tqdm import tqdm
 from twisted.internet import reactor
@@ -36,9 +38,107 @@ def send(args, reactor=reactor):
     return Sender(args, reactor).go()
 
 
-def build_offer(args):
-    offer = {}
+@attrs
+class TextAction(object):
+    _text = attrib(validator=instance_of(type(u"")))
+    def describe(self, stderr):
+        print(u"Sending text message (%s)" % naturalsize(len(self._text)),
+              file=stderr)
+    def offer_and_fd(self, stderr):
+        # build an old-style single-shot offer dictionary, where we can
+        # either send a text message or a single fd (which might be a single
+        # file or a directory)
+        return {"message": self._text}, None
 
+@attrs
+class FileAction(object):
+    _filename = attrib()
+    _basename = attrib()
+    _filesize = attrib(validator=instance_of(int))
+    def describe(self, stderr):
+        print(u"Sending %s file named '%s'" % (naturalsize(self._filesize),
+                                               self._basename),
+              file=stderr)
+    def offer_and_fd(self, stderr):
+        return {
+            "file": {
+                "filename": self._basename,
+                "filesize": self._filesize,
+                },
+            }, open(self._filename, "rb")
+
+@attrs
+class DirectoryAction(object):
+    _directoryname = attrib()
+    _basename = attrib()
+    _ignore_unsendable_files = attrib(validator=instance_of(bool))
+
+    def describe(self, stderr):
+        print(u"Sending directory named '%s'" % self._basename,
+              file=stderr)
+
+    def offer_and_fd(self, stderr):
+        # hrm, our one-shot (legacy) offer must include the size of the
+        # compressed zipfile. But if we can do new-style, then we stream the
+        # files individually, to avoid the RAM hit. So we can't build the
+        # offer until we know what the other side can accept, which doesn't
+        # happen until we see their get_versions() dictionary.
+
+        # offer() is only called if we're doing an old-style transfer
+
+        print(u"Building zipfile..", file=stderr)
+        # We're sending a directory. Create a zipfile in a tempdir and
+        # send that.
+        fd_to_send = tempfile.SpooledTemporaryFile()
+        # workaround for https://bugs.python.org/issue26175 (STF doesn't
+        # fully implement IOBase abstract class), which breaks the new
+        # zipfile in py3.7.0 that expects .seekable
+        if not hasattr(fd_to_send, "seekable"):
+            # AFAICT all the filetypes that STF wraps can seek
+            fd_to_send.seekable = lambda: True
+        num_files = 0
+        num_bytes = 0
+        tostrip = len(self._directoryname.split(os.sep))
+        with zipfile.ZipFile(
+                fd_to_send,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                allowZip64=True) as zf:
+            for path, dirs, files in os.walk(self._directoryname):
+                # path always starts with directoryname, then sometimes might
+                # have "/subdir" appended. We want the zipfile to contain ""
+                # or "subdir"
+                localpath = list(path.split(os.sep)[tostrip:])
+                for fn in files:
+                    archivename = os.path.join(*tuple(localpath + [fn]))
+                    localfilename = os.path.join(path, fn)
+                    try:
+                        zf.write(localfilename, archivename)
+                        num_bytes += os.stat(localfilename).st_size
+                        num_files += 1
+                    except OSError as e:
+                        errmsg = u"{}: {}".format(fn, e.strerror)
+                        if self._ignore_unsendable_files:
+                            print(
+                                u"{} (ignoring error)".format(errmsg),
+                                file=stderr)
+                        else:
+                            raise UnsendableFileError(errmsg)
+        fd_to_send.seek(0, 2)
+        filesize = fd_to_send.tell()
+        fd_to_send.seek(0, 0)
+        offer = {
+            "directory": {
+                "mode": "zipfile/deflated",
+                "dirname": self._basename,
+                "zipsize": filesize,
+                "numbytes": num_bytes,
+                "numfiles": num_files,
+                },
+            }
+        return offer, fd_to_send
+
+def build_action(args):
     text = args.text
     if text == "-":
         print(u"Reading text message from stdin..", file=args.stderr)
@@ -47,12 +147,7 @@ def build_offer(args):
         text = six.moves.input("Text to send: ")
 
     if text is not None:
-        print(
-            u"Sending text message (%s)" % naturalsize(len(text)),
-            file=args.stderr)
-        offer = {"message": text}
-        fd_to_send = None
-        return offer, fd_to_send
+        return TextAction(text)
 
     # click.Path (with resolve_path=False, the default) does not do path
     # resolution, so we must join it to cwd ourselves. We could use
@@ -104,73 +199,10 @@ def build_offer(args):
             "Cannot send: no file/directory named '%s'" % args.what)
 
     if os.path.isfile(what):
-        # we're sending a file
-        filesize = os.stat(what).st_size
-        offer["file"] = {
-            "filename": basename,
-            "filesize": filesize,
-        }
-        print(
-            u"Sending %s file named '%s'" % (naturalsize(filesize),
-                                             basename),
-            file=args.stderr)
-        fd_to_send = open(what, "rb")
-        return offer, fd_to_send
+        return FileAction(what, basename, os.stat(what).st_size)
 
     if os.path.isdir(what):
-        print(u"Building zipfile..", file=args.stderr)
-        # We're sending a directory. Create a zipfile in a tempdir and
-        # send that.
-        fd_to_send = tempfile.SpooledTemporaryFile()
-        # workaround for https://bugs.python.org/issue26175 (STF doesn't
-        # fully implement IOBase abstract class), which breaks the new
-        # zipfile in py3.7.0 that expects .seekable
-        if not hasattr(fd_to_send, "seekable"):
-            # AFAICT all the filetypes that STF wraps can seek
-            fd_to_send.seekable = lambda: True
-        num_files = 0
-        num_bytes = 0
-        tostrip = len(what.split(os.sep))
-        with zipfile.ZipFile(
-                fd_to_send,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-                allowZip64=True) as zf:
-            for path, dirs, files in os.walk(what):
-                # path always starts with args.what, then sometimes might
-                # have "/subdir" appended. We want the zipfile to contain
-                # "" or "subdir"
-                localpath = list(path.split(os.sep)[tostrip:])
-                for fn in files:
-                    archivename = os.path.join(*tuple(localpath + [fn]))
-                    localfilename = os.path.join(path, fn)
-                    try:
-                        zf.write(localfilename, archivename)
-                        num_bytes += os.stat(localfilename).st_size
-                        num_files += 1
-                    except OSError as e:
-                        errmsg = u"{}: {}".format(fn, e.strerror)
-                        if args.ignore_unsendable_files:
-                            print(
-                                u"{} (ignoring error)".format(errmsg),
-                                file=args.stderr)
-                        else:
-                            raise UnsendableFileError(errmsg)
-        fd_to_send.seek(0, 2)
-        filesize = fd_to_send.tell()
-        fd_to_send.seek(0, 0)
-        offer["directory"] = {
-            "mode": "zipfile/deflated",
-            "dirname": basename,
-            "zipsize": filesize,
-            "numbytes": num_bytes,
-            "numfiles": num_files,
-        }
-        print(
-            u"Sending directory (%s compressed) named '%s'" %
-            (naturalsize(filesize), basename),
-            file=args.stderr)
-        return offer, fd_to_send
+        return DirectoryAction(what, basename, args.ignore_unsendable_files)
 
     raise TypeError("'%s' is neither file nor directory" % args.what)
 
@@ -240,7 +272,8 @@ class Sender:
 
         # TODO: run the blocking zip-the-directory IO in a thread, let the
         # wormhole exchange happen in parallel
-        offer, self._fd_to_send = build_offer(self._args)
+        action = build_action(self._args)
+        action.describe(self._args.stderr)
         args = self._args
 
         other_cmd = u"wormhole receive"
@@ -298,6 +331,8 @@ class Sender:
         if args.verify:
             self._check_verifier(w,
                                  verifier_bytes)  # blocks, can TransferError
+
+        offer, self._fd_to_send = action.offer_and_fd(self._args.stderr)
 
         if self._fd_to_send:
             ts = TransitSender(
@@ -364,145 +399,6 @@ class Sender:
     def _handle_transit(self, receiver_transit):
         ts = self._transit_sender
         ts.add_connection_hints(receiver_transit.get("hints-v1", []))
-
-    def _build_offer(self):
-        offer = {}
-
-        args = self._args
-        text = args.text
-        if text == "-":
-            print(u"Reading text message from stdin..", file=args.stderr)
-            text = sys.stdin.read()
-        if not text and not args.what:
-            text = six.moves.input("Text to send: ")
-
-        if text is not None:
-            print(
-                u"Sending text message (%s)" % naturalsize(len(text)),
-                file=args.stderr)
-            offer = {"message": text}
-            fd_to_send = None
-            return offer, fd_to_send
-
-        # click.Path (with resolve_path=False, the default) does not do path
-        # resolution, so we must join it to cwd ourselves. We could use
-        # resolve_path=True, but then it would also do os.path.realpath(),
-        # which would replace the basename with the target of a symlink (if
-        # any), which is not what I think users would want: if you symlink
-        # X->Y and send X, you expect the recipient to save it in X, not Y.
-        #
-        # TODO: an open question is whether args.cwd (i.e. os.getcwd()) will
-        # be unicode or bytes. We need it to be something that can be
-        # os.path.joined with the unicode args.what .
-        what = os.path.join(args.cwd, args.what)
-
-        # We always tell the receiver to create a file (or directory) with the
-        # same basename as what the local user typed, even if the local object
-        # is a symlink to something with a different name. The normpath() is
-        # there to remove trailing slashes.
-        basename = os.path.basename(os.path.normpath(what))
-        assert basename != "", what  # normpath shouldn't allow this
-
-        # We use realpath() instead of normpath() to locate the actual
-        # file/directory, because the path might contain symlinks, and
-        # normpath() would collapse those before resolving them.
-        # test_cli.OfferData.test_symlink_collapse tests this.
-
-        # Unfortunately on windows, realpath() (on py3) is built out of
-        # normpath() because of a py2-era belief that windows lacks a working
-        # os.path.islink(): see https://bugs.python.org/issue9949 . The
-        # consequence is that "wormhole send PATH" might send the wrong file,
-        # if:
-        # * we're running on windows
-        # * PATH goes down through a symlink and then up with parent-directory
-        #   navigation (".."), then back down again
-        # * the back-down-again portion of the path also exists under the
-        #   original directory (an error is thrown if not)
-
-        # I'd like to fix this. The core issue is sending directories with a
-        # trailing slash: we need to 1: open the right directory, and 2: strip
-        # the right parent path out of the filenames we get from os.walk(). We
-        # used to use what.rstrip() for this, but bug #251 reported this
-        # failing on windows-with-bash. realpath() works in both those cases,
-        # but fails with the up-down symlinks situation. I think we'll need to
-        # find a third way to strip the trailing slash reliably in all
-        # environments.
-
-        what = os.path.realpath(what)
-        if not os.path.exists(what):
-            raise TransferError(
-                "Cannot send: no file/directory named '%s'" % args.what)
-
-        if os.path.isfile(what):
-            # we're sending a file
-            filesize = os.stat(what).st_size
-            offer["file"] = {
-                "filename": basename,
-                "filesize": filesize,
-            }
-            print(
-                u"Sending %s file named '%s'" % (naturalsize(filesize),
-                                                 basename),
-                file=args.stderr)
-            fd_to_send = open(what, "rb")
-            return offer, fd_to_send
-
-        if os.path.isdir(what):
-            print(u"Building zipfile..", file=args.stderr)
-            # We're sending a directory. Create a zipfile in a tempdir and
-            # send that.
-            fd_to_send = tempfile.SpooledTemporaryFile()
-            # workaround for https://bugs.python.org/issue26175 (STF doesn't
-            # fully implement IOBase abstract class), which breaks the new
-            # zipfile in py3.7.0 that expects .seekable
-            if not hasattr(fd_to_send, "seekable"):
-                # AFAICT all the filetypes that STF wraps can seek
-                fd_to_send.seekable = lambda: True
-            num_files = 0
-            num_bytes = 0
-            tostrip = len(what.split(os.sep))
-            with zipfile.ZipFile(
-                    fd_to_send,
-                    "w",
-                    compression=zipfile.ZIP_DEFLATED,
-                    allowZip64=True) as zf:
-                for path, dirs, files in os.walk(what):
-                    # path always starts with args.what, then sometimes might
-                    # have "/subdir" appended. We want the zipfile to contain
-                    # "" or "subdir"
-                    localpath = list(path.split(os.sep)[tostrip:])
-                    for fn in files:
-                        archivename = os.path.join(*tuple(localpath + [fn]))
-                        localfilename = os.path.join(path, fn)
-                        try:
-                            zf.write(localfilename, archivename)
-                            num_bytes += os.stat(localfilename).st_size
-                            num_files += 1
-                        except OSError as e:
-                            errmsg = u"{}: {}".format(fn, e.strerror)
-                            if self._args.ignore_unsendable_files:
-                                print(
-                                    u"{} (ignoring error)".format(errmsg),
-                                    file=args.stderr)
-                            else:
-                                raise UnsendableFileError(errmsg)
-            fd_to_send.seek(0, 2)
-            filesize = fd_to_send.tell()
-            fd_to_send.seek(0, 0)
-            offer["directory"] = {
-                "mode": "zipfile/deflated",
-                "dirname": basename,
-                "zipsize": filesize,
-                "numbytes": num_bytes,
-                "numfiles": num_files,
-            }
-            print(
-                u"Sending directory (%s compressed) named '%s'" %
-                (naturalsize(filesize), basename),
-                file=args.stderr)
-            return offer, fd_to_send
-
-        raise TypeError("'%s' is neither file nor directory" % args.what)
 
     @inlineCallbacks
     def _handle_answer(self, them_answer):

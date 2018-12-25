@@ -24,14 +24,15 @@ import mock
 from .. import __version__
 from .._interfaces import ITorManager
 from ..cli import cli, cmd_receive, cmd_send, welcome
+from ..cli.cmd_send import build_action
 from ..errors import (ServerConnectionError, TransferError,
                       UnsendableFileError, WelcomeError, WrongPasswordError)
 from .common import ServerBase, config
 
 
 def build_offer(args):
-    s = cmd_send.Sender(args, None)
-    return s._build_offer()
+    a = build_action(args)
+    return a.offer_and_fd(args.stderr)
 
 
 class OfferData(unittest.TestCase):
