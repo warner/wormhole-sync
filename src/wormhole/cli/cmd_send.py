@@ -40,7 +40,7 @@ def send(args, reactor=reactor):
 
 @attrs
 class TextAction(object):
-    _text = attrib(validator=instance_of(type(u"")))
+    _text = attrib(validator=instance_of(type("")))
     def describe(self, stderr):
         print(u"Sending text message (%s)" % naturalsize(len(self._text)),
               file=stderr)
