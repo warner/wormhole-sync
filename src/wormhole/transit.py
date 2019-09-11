@@ -596,7 +596,7 @@ class Common:
         direct_hints = [
             DirectTCPV1Hint(six.u(addr), portnum, 0.0) for addr in addresses
         ]
-        ep = endpoints.serverFromString(reactor, "tcp:%d" % portnum)
+        ep = endpoints.serverFromString(reactor, "tcp:%d:interface=\:\:" % portnum)
         return direct_hints, ep
 
     def get_connection_abilities(self):
