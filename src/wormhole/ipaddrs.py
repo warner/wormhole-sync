@@ -17,20 +17,29 @@ _win32_re = re.compile(
     (r'^\s*\d+\.\d+\.\d+\.\d+\s.+\s'
      r'(?P<address>\d+\.\d+\.\d+\.\d+)\s+(?P<metric>\d+)\s*$'),
     flags=re.M | re.I | re.S)
-_win32_commands = (('route.exe', ('print', ), _win32_re), )
+_win32_commands = (('route.exe', ('print', ), _win32_re, None), )
 
 # These work in most Unices.
 _addr_re = re.compile(
     r'^\s*inet [a-zA-Z]*:?(?P<address>\d+\.\d+\.\d+\.\d+)[\s/].+$',
     flags=re.M | re.I | re.S)
+# macOS ifconfig (link): inet6 fe80::49b:d8e4:8af8:30e%en0 prefixlen 64 secured scopeid 0x8
+# linux ip (link): inet6 fe80::ec4:7aff:fe46:a6cc/64 scope link
+# linux ip (global): inet6 2600:3c00::f03c:91ff:fe62:b5b5/64 scope global dynamic mngtmpaddr noprefixroute
+# linux ifconfig (global): inet6 2600:3c00::f03c:91ff:fe62:b5b5  prefixlen 64  scopeid 0x0<global>
+
+_addr6_re = re.compile(
+    r'^\s*inet6 (?P<address>[0-9a-f:]+)[\s/%].+global.*$',
+    flags=re.M | re.I | re.S)
+
 _unix_commands = (
-    ('/bin/ip', ('addr', ), _addr_re),
-    ('/sbin/ip', ('addr', ), _addr_re),
-    ('/sbin/ifconfig', ('-a', ), _addr_re),
-    ('/usr/sbin/ifconfig', ('-a', ), _addr_re),
-    ('/usr/etc/ifconfig', ('-a', ), _addr_re),
-    ('ifconfig', ('-a', ), _addr_re),
-    ('/sbin/ifconfig', (), _addr_re),
+    ('/bin/ip', ('addr', ), _addr_re, _addr6_re),
+    ('/sbin/ip', ('addr', ), _addr_re, _addr6_re),
+    ('/sbin/ifconfig', ('-a', ), _addr_re, _addr6_re),
+    ('/usr/sbin/ifconfig', ('-a', ), _addr_re, _addr6_re),
+    ('/usr/etc/ifconfig', ('-a', ), _addr_re, _addr6_re),
+    ('ifconfig', ('-a', ), _addr_re, _addr6_re),
+    ('/sbin/ifconfig', (), _addr_re, _addr6_re),
 )
 
 
@@ -43,7 +52,7 @@ def find_addresses():
     else:
         commands = _unix_commands
 
-    for (pathtotool, args, regex) in commands:
+    for (pathtotool, args, v4regex, v6regex) in commands:
         # If pathtotool is a fully qualified path then we just try that.
         # If it is merely an executable name then we use Twisted's
         # "which()" utility and try each executable in turn until one
@@ -56,7 +65,7 @@ def find_addresses():
 
         for exe in exes_to_try:
             try:
-                addresses = _query(exe, args, regex)
+                addresses = _query(exe, args, v4regex, v6regex)
             except Exception:
                 addresses = []
             if addresses:
@@ -65,7 +74,7 @@ def find_addresses():
     return ["127.0.0.1"]
 
 
-def _query(path, args, regex):
+def _query(path, args, v4regex, v6regex):
     env = {'LANG': 'en_US.UTF-8'}
     trial = 0
     while True:
@@ -87,10 +96,16 @@ def _query(path, args, regex):
     addresses = []
     outputsplit = output.split('\n')
     for outline in outputsplit:
-        m = regex.match(outline)
+        m = v4regex.match(outline)
         if m:
             addr = m.group('address')
             if addr not in addresses:
                 addresses.append(addr)
+        if v6regex:
+            m = v6regex.match(outline)
+            if m:
+                addr = m.group('address')
+                if addr not in addresses:
+                    addresses.append(addr)
 
     return addresses
