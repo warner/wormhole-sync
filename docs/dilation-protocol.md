@@ -163,15 +163,25 @@ derived key)
 
 (TODO: reduce the number of round-trip stalls here, I've added too many)
 
-Each side is in the "connecting" state (which encompasses both making connection attempts and having an established connection) starting with the receipt of a `please` message and a local `w.dilate()` call.
-The Leader remains in that state until it abandons the connection and sends a `reconnect` message, at which point it remains in the "flushing" state until the Follower's `reconnecting` message is received.
-The Follower remains in "connecting" until it receives `reconnect`, then it stays in "dropping" until it finishes halting all outstanding connections, after which it sends `reconnecting` and switches back to "connecting".
+Each side is in the "connecting" state (which encompasses both making
+connection attempts and having an established connection) starting with the
+receipt of a `please-dilate` message and a local `w.dilate()` call. The
+Leader remains in that state until it abandons the connection and sends a
+`reconnect` message, at which point it remains in the "flushing" state until
+the Follower's `reconnecting` message is received. The Follower remains in
+"connecting" until it receives `reconnect`, then it stays in "dropping" until
+it finishes halting all outstanding connections, after which it sends
+`reconnecting` and switches back to "connecting".
 
-"Connection hints" are type/address/port records that tell the other side of likely targets for L2 connections.
-Both sides will try to determine their external IP addresses, listen on a TCP port, and advertise `(tcp, external-IP, port)` as a connection hint.
-The Transit Relay is also used as a (lower-priority) hint.
-These are sent in `connection-hint` records, which can be sent any time after both sending and receiving a `please` record.
-Each side will initiate connections upon receipt of the hints.
+"Connection hints" are type/address/port records that tell the other side of
+likely targets for L2 connections. Both sides will try to determine their
+external IP addresses, listen on a TCP port, and advertise `(tcp,
+external-IP, port)` as a connection hint. The Transit Relay is also used as a
+(lower-priority) hint. These are sent in `connection-hint` records, which can
+be sent any time after both sending and receiving a `please` record.
+(XXX actually only in "CONNECTING" state)
+Each
+side will initiate connections upon receipt of the hints.
 
 ```
 { "type": "connection-hints",
